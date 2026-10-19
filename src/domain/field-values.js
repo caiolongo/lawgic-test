@@ -1,7 +1,7 @@
 import { format, isValid, parse } from 'date-fns';
 import { normalizeForCompare } from './text-normalize.js';
 
-const EMPTY_VALUES = new Set(['', 'INDEFINIDO', 'NÃO SE APLICA', 'N/A']);
+const EMPTY_VALUES = new Set(['', 'INDEFINIDO', 'NÃO SE APLICA', 'N/A'].map(normalizeForCompare));
 
 const DATE_FORMATS = [
   { pattern: /^\d{2}\/\d{2}\/\d{4}$/, format: 'dd/MM/yyyy' },
@@ -11,7 +11,7 @@ const DATE_FORMATS = [
 export function isEmptyValue(value) {
   if (value === null || value === undefined) return true;
   if (typeof value !== 'string') return false;
-  return EMPTY_VALUES.has(value.normalize('NFC').trim());
+  return EMPTY_VALUES.has(normalizeForCompare(value.trim()));
 }
 
 export function parseText(value) {

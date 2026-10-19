@@ -23,11 +23,15 @@ describe('isEmptyValue', () => {
     assert.equal(isEmptyValue('NÃO SE APLICA'), true);
   });
 
-  for (const value of ['indefinido', 'Indefinido', 'NAO SE APLICA', 'não se aplica', 'n/a', 'NA']) {
-    it(`não considera vazio ${JSON.stringify(value)}, que não está na lista do README`, () => {
-      assert.equal(isEmptyValue(value), false);
+  for (const value of ['indefinido', 'Indefinido', 'NAO SE APLICA', 'não se aplica', 'n/a']) {
+    it(`considera vazio ${JSON.stringify(value)}, ignorando caixa e acento`, () => {
+      assert.equal(isEmptyValue(value), true);
     });
   }
+
+  it('não considera vazio "NA", que não está na lista do README', () => {
+    assert.equal(isEmptyValue('NA'), false);
+  });
 
   for (const value of ['Mariana Costa Ribeiro', 'INDEFINIDO, mas citado', 0, false, [], {}]) {
     it(`não considera vazio ${JSON.stringify(value)}`, () => {

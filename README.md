@@ -143,8 +143,8 @@ do seed), `date-fns` (datas), `fetch` nativo, `node:test` + `supertest`.
 ## Decisões
 
 ### Pós-processamento da resposta da IA
-- **Nulos**: `"INDEFINIDO"`, `"NÃO SE APLICA"`, `"N/A"` e vazio são comparados **exatamente** (depois de tirar os
-  espaços das pontas), como o enunciado lista. `"indefinido"` em minúsculas não vira `null`.
+- **Nulos**: `"INDEFINIDO"`, `"NÃO SE APLICA"`, `"N/A"` e vazio viram `null` ignorando caixa, acento e espaços nas
+  pontas (`"indefinido"` e `"NAO SE APLICA"` também). Outras grafias, como `"NA"`, não.
 - **Espaços nas pontas** são removidos em todos os tipos, não só em `text`: espaço nas pontas nunca é conteúdo, e sem isso
   `" 22/01/2025"` viraria `null` em silêncio.
 - **Datas**: só `DD/MM/AAAA` e `AAAA-MM-DD`, a string inteira, com validação de calendário (`31/02/2025` → `null`).
@@ -206,18 +206,28 @@ do seed), `date-fns` (datas), `fetch` nativo, `node:test` + `supertest`.
   página, então 5 páginas densas passam do limite.
 - **Corte do prompt pela menor nota**: se o RAG escolher trechos demais, o corte pode tirar o único trecho de uma frase.
   Com os dados atuais não há corte.
-- **Nulos em outra grafia** (`"indefinido"`, `"NAO SE APLICA"`) não viram `null` num campo de texto, porque o enunciado
-  lista os valores exatos.
 
 ## O que eu faria com mais tempo
 
+- **Autenticação e autorização**: Atualmente qualquer um consegue enviar requisições para a API.
+- **Limite de requisições** por cliente na extração: cada chamada consome a IA, e num provedor real isso tem custo.
 - **Testes de integração mais amplos**: uma terceira empresa fictícia criada só em `data/` (com `attached` em cascata),
   carregada pelo seed e extraída via HTTP contra o mock, provando que funciona sem mudar código e uma bateria de PDFs
   além dos dois fornecidos (densos, digitalizados, com senha).
 - **PDF curto que não cabe no prompt**: aplicar o RAG também nesse caso, em vez de responder 502.
-- **Retry com backoff** para falhas transitórias da IA.
+- **Retry com backoff** para falhas transitórias da IA (`LIA_UNAVAILABLE`, 5xx) e para resposta inválida
+  (`LIA_INVALID_RESPONSE`): o mock é determinístico, mas um modelo real pode errar o formato numa chamada e acertar na
+  seguinte. Erros 4xx da IA, como o 413, ficam de fora: repetir dá o mesmo resultado.
 - **OCR** para PDFs digitalizados, sem texto.
 - **Embeddings em lotes** de tamanho configurável: provedores reais limitam o número de entradas e de tokens por chamada.
 - **Empresa sem frases de busca**: um fallback (por exemplo, o começo do documento até o limite do prompt) no lugar do
   formulário vazio.
 - **CORS configurável na API**, para o front chamá-la direto, sem o proxy de desenvolvimento.
+- **Extração em lote**: receber vários PDFs, responder `202` com os ids e processar numa fila; o
+  `GET /extractions/:id` já serve para consultar, faltaria um `status`.
+- **Regras de visibilidade num pacote compartilhado**: o front usa uma cópia do `visibility.js`, e uma mudança só na API
+  faz os dois divergirem sem nenhum teste falhar. No mínimo, uma checagem no CI que compare os dois arquivos.
+- **Logs estruturados** (por exemplo, `pino`) com id da requisição, empresa, estratégia, `usedChunks` e tempo de cada
+  chamada à IA; hoje é `console`.
+- **`/health` que verifique o Mongo**: hoje responde `ok` mesmo com o banco fora do ar. Um `ping` no banco deixaria o
+  orquestrador tirar a instância de circulação.
