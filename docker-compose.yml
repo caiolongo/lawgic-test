@@ -16,17 +16,18 @@ services:
     environment:
       MOCK_DEBUG: "0" # "1" inclui `debug.missingEvidence` nas respostas do /v1/chat
 
-  # Adicione aqui o serviço da sua API, por exemplo:
-  #
-  # api:
-  #   build: .
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     MONGO_URI: mongodb://mongo:27017/mini-lia
-  #     LIA_BASE_URL: http://lia-mock:4010
-  #   depends_on:
-  #     mongo:
-  #       condition: service_healthy
-  #     lia-mock:
-  #       condition: service_started
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017/mini-lia
+      LIA_BASE_URL: http://lia-mock:4010
+    volumes:
+      # Uma empresa nova em data/ entra com `docker compose up`, sem rebuild.
+      - ./data:/app/data:ro
+    depends_on:
+      mongo:
+        condition: service_healthy
+      lia-mock:
+        condition: service_started

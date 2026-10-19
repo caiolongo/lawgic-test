@@ -1,304 +1,223 @@
-# Teste técnico — Mini-LIA
+# Mini-LIA
 
-Desenvolvedor(a) Fullstack, foco em backend
+API em Node.js + MongoDB que recebe o PDF de um processo, pede à IA (LIA Mock) os campos do formulário da empresa,
+limpa a resposta, aplica as regras de exibição e devolve o formulário pronto.
 
-## Contexto
+O enunciado original do teste está em [`ENUNCIADO.md`](ENUNCIADO.md).
 
-Em nosso produto, integramos IA a fluxos jurídicos para agilizar processos operacionais das empresas clientes. Um desses fluxos é o cadastro: a partir de um documento, a IA preenche um formulário. Cada empresa cliente tem o **seu** formulário: campos diferentes, opções diferentes e regras que mostram ou escondem campos conforme o que já foi preenchido.
+- [Rodando com Docker](#rodando-com-docker-recomendado)
+- [Variáveis de ambiente](#variáveis-de-ambiente)
+- [Testes](#testes)
+- [Endpoints](#endpoints)
+- [Como funciona](#como-funciona)
+- [Arquitetura](#arquitetura)
+- [Decisões](#decisões)
+- [Limitações conhecidas](#limitações-conhecidas)
+- [O que eu faria com mais tempo](#o-que-eu-faria-com-mais-tempo)
 
-Neste teste você vai construir uma versão pequena desse fluxo: uma API que recebe um PDF, pede à IA os campos daquela empresa, limpa a resposta e devolve o formulário pronto.
+---
 
-Você **não** precisa de chave de nenhuma IA paga. O repositório traz o **LIA Mock**, um serviço que roda na sua máquina (com ou sem Docker) e imita uma API de IA: um endpoint de chat e um de embeddings. Você o chama por HTTP como chamaria a OpenAI, mas sem custo e sem internet. Ele responde de forma previsível, e é por isso que dá para corrigir o teste automaticamente.
+## Rodando com Docker
 
-<div style="page-break-before: always;"></div>
-
-## Como as peças se conectam
-
-O fluxo do `POST /companies/:companyKey/extractions`, do PDF recebido à resposta:
-
-```mermaid
-flowchart TD
-    A["<b>1. Recebe o PDF</b><br/>POST /companies/:companyKey/extractions"]
-    B["<b>2. Busca a empresa no MongoDB</b><br/>campos do formulário e frases de busca"]
-    C["<b>3. Lê o texto do PDF</b><br/>e conta as páginas"]
-    D{"Mais de<br/>5 páginas?"}
-    E["<b>Texto inteiro</b><br/>strategy: fullContent"]
-    F["<b>4. RAG: escolhe só os trechos relevantes</b><br/>divide o texto em chunks<br/>gera os vetores no LIA Mock (/v1/embeddings)<br/>compara com as frases de busca (cosseno)<br/>strategy: chunked"]
-    G["<b>5. Pede à IA o valor de cada campo</b><br/>LIA Mock (/v1/chat): keys dos campos + texto"]
-    H["<b>6. Limpa a resposta da IA</b><br/>JSON, opções, datas, INDEFINIDO → null"]
-    I["<b>7. Aplica as regras de exibição</b><br/>tira os campos ocultos, lista os obrigatórios vazios"]
-    J["<b>8. Grava no MongoDB e responde 201</b><br/>formData + missingRequired"]
-
-    A --> B --> C --> D
-    D -- "não" --> E
-    D -- "sim" --> F
-    E --> G
-    F --> G
-    G --> H --> I --> J
-
-    classDef default fill:#ffffff,stroke:#8a94a6,color:#1c2330
-    classDef mongo fill:#d6f0de,stroke:#2e8b57,stroke-width:2px,color:#1c2330
-    classDef mock fill:#e2d8fb,stroke:#6a46d1,stroke-width:2px,color:#1c2330
-    class B,J mongo
-    class F,G mock
-```
-
-Em verde, as etapas que usam o MongoDB; em roxo, as que chamam o LIA Mock. Cada etapa está detalhada na seção [3. `POST /companies/:companyKey/extractions`](#3-post-companiescompanykeyextractions).
-
-<div style="page-break-before: always;"></div>
-
-## O que já vem pronto
-
-```
-data/
-  companies.json      2 empresas
-  fields.json         campos de cada empresa (tipos, opções, regras de exibição)
-  queries.json        frases de busca por empresa, para o RAG
-  documents/          processo-curto.pdf (3 páginas) e processo-longo.pdf (18 páginas)
-lia-mock/             o mock da IA (não altere)
-postman/              coleção com exemplos de chamada ao mock
-docker-compose.yml    mongo + lia-mock; você adiciona a sua API
-```
-
-A coleção `postman/lia-mock.postman_collection.json` tem exemplos prontos de chamada ao mock: extração de campos (com o modo de depuração), um prompt grande demais (413) e embeddings, com o cálculo de similaridade de cosseno no script de teste da requisição.
-
-## Rodando o ambiente: com ou sem Docker
-
-Sua API depende de duas coisas: um **MongoDB** e o **LIA Mock**. Para desenvolver, você pode subir os dois com Docker, sem Docker, ou misturar. A API só precisa ler dois endereços de variáveis de ambiente (veja o `.env.example`):
-
-| Variável | O que é |
-|---|---|
-| `MONGO_URI` | conexão com o MongoDB |
-| `LIA_BASE_URL` | endereço do LIA Mock |
-
-### Com Docker
+Pré-requisito: Docker com Docker Compose. Não precisa de `.env` nem de Node instalado.
 
 ```bash
-docker compose up -d mongo lia-mock
+git clone https://github.com/caiolongo/lawgic-test.git
+cd lawgic-test
+docker compose up --build
 ```
 
-Sobe um MongoDB 7 em `localhost:27017` e o mock em `localhost:4010`. Com a sua API rodando fora do Docker (`npm start`, por exemplo):
+Isso sobe três serviços: **MongoDB** (`localhost:27017`), **LIA Mock** (`localhost:4010`) e a **API** (`localhost:3000`).
+Antes de a API subir, o seed carrega `data/` no Mongo automaticamente. O log mostra:
+
+```
+api-1  | Empresas: 2 (2 novas, 0 existentes)
+api-1  | Campos: 25 (25 novos, 0 existentes, 0 removidos)
+api-1  | Frases: 16 em 2 empresas
+api-1  | Mini-LIA ouvindo na porta 3000
+```
+
+Em outro terminal, as duas extrações do enunciado:
 
 ```bash
-MONGO_URI=mongodb://localhost:27017/mini-lia
-LIA_BASE_URL=http://localhost:4010
+curl -F "file=@data/documents/processo-curto.pdf" http://localhost:3000/companies/acme-edu/extractions
+curl -F "file=@data/documents/processo-longo.pdf" http://localhost:3000/companies/rodovia-sul/extractions
 ```
 
-### Sem Docker
+Para começar do zero (apaga o banco): `docker compose down -v && docker compose up --build`.
 
-**LIA Mock:** é Node puro, sem dependências. Não precisa de `npm install` (Node 20 ou superior):
+A pasta `data/` é montada no container (somente leitura). Uma empresa nova adicionada em `data/` entra com
+`docker compose up`, sem rebuild: o seed roda a cada subida e não duplica nada.
+
+## Variáveis de ambiente
+
+São validadas na partida: valor faltando ou inválido derruba a API com uma mensagem dizendo qual variável corrigir.
+
+| Variável | Obrigatória | Padrão | O que é |
+|---|---|---|---|
+| `MONGO_URI` | sim | — | Conexão com o MongoDB. Use o nome do banco no fim (`.../mini-lia`); sem ele, API e seed usam o banco padrão do driver |
+| `LIA_BASE_URL` | sim | — | Endereço do LIA Mock (`http://localhost:4010`; dentro do compose, `http://lia-mock:4010`) |
+| `PORT` | não | `3000` | Porta da API |
+| `LIA_TIMEOUT_MS` | não | `30000` | Tempo máximo de cada chamada à IA; acima disso, 502 |
+| `RAG_CHUNK_SIZE` | não | `1200` | Tamanho dos trechos do RAG, em caracteres |
+| `RAG_CHUNK_OVERLAP` | não | `200` | Sobreposição entre trechos vizinhos (precisa ser menor que `RAG_CHUNK_SIZE`) |
+| `RAG_DEFAULT_TOP_K` | não | `2` | Trechos escolhidos por frase de busca, quando a frase não define o próprio `topK` |
+| `PROMPT_MAX_CHARS` | não | `16000` | Limite do prompt (o mesmo do LIA Mock) |
+| `UPLOAD_MAX_BYTES` | não | `10485760` | Tamanho máximo do PDF (10 MB); acima disso, 413 |
+
+No Docker, o `docker-compose.yml` define `MONGO_URI` e `LIA_BASE_URL`; o `.env` não é usado.
+
+## Testes
 
 ```bash
-cd lia-mock
-node src/server.js        # sobe em http://localhost:4010
+docker compose up -d mongo   # os testes de integração usam o Mongo em localhost:27017
+npm test
 ```
 
-Para ligar o modo de depuração: `MOCK_DEBUG=1 node src/server.js`.
+384 testes com o runner nativo do Node (`node:test`) e `supertest`. Não precisam do LIA Mock: os testes de pipeline e de
+rota usam a lógica do próprio mock (`lia-mock/src/chat.js` e `embeddings.js`) dentro do processo ou num servidor de
+teste. Cada arquivo usa um banco próprio (`mini-lia-test-*`), porque o `node:test` roda os arquivos em paralelo.
 
-**MongoDB**, escolha uma opção:
+## Endpoints
 
-| Opção | `MONGO_URI` | Observação |
+| Método e rota | Sucesso | Erros |
 |---|---|---|
-| MongoDB instalado na sua máquina | `mongodb://localhost:27017/mini-lia` | MongoDB Community, versão 6 ou superior |
-| MongoDB Atlas (plano gratuito) | `mongodb+srv://<usuário>:<senha>@<cluster>/mini-lia` | na nuvem, não instala nada; precisa de internet |
-| [`mongodb-memory-server`](https://github.com/typegoose/mongodb-memory-server) | gerado na hora, pelo próprio pacote | sobe um Mongo temporário dentro do processo Node; baixa o binário na primeira execução e os dados somem quando o processo para. Só para a sua máquina: não funciona na imagem `node:alpine` |
+| `GET /companies/:companyKey/fields` | `200` campos ordenados por `order`, no formato de `fields.json` | `404` |
+| `POST /companies/:companyKey/extractions` (PDF em `multipart/form-data`, campo `file`) | `201` `{ id, companyKey, strategy, usedChunks, formData, missingRequired, createdAt }` | `400`, `404`, `413`, `502` |
+| `GET /extractions/:id` | `200`, mesmo formato do POST | `404` |
+| `GET /health` | `200` `{ status: "ok" }` | — |
 
-### Misturando os dois
+Todo erro sai no mesmo formato: `{ "error": { "code": "...", "message": "...", "details": { ... } } }`.
 
-De dentro de um container, `localhost` é o próprio container. Então:
-
-| Sua API roda… | Mongo e mock rodam… | Endereços |
+| Status | `code` | Quando |
 |---|---|---|
-| fora do Docker | no Docker ou fora | `localhost:27017` e `localhost:4010` |
-| no compose | no compose | `mongodb://mongo:27017/mini-lia` e `http://lia-mock:4010` (nomes dos serviços) |
-| num container | fora do Docker | `host.docker.internal:27017` e `host.docker.internal:4010` |
+| 400 | `FILE_REQUIRED` | sem arquivo (inclusive corpo que não é multipart) |
+| 400 | `INVALID_PDF` | não começa com `%PDF-` nos primeiros 1024 bytes, ou o PDF não abre |
+| 400 | `INVALID_UPLOAD` | arquivo em outro campo, mais de um arquivo, multipart malformado |
+| 404 | `COMPANY_NOT_FOUND` / `EXTRACTION_NOT_FOUND` | empresa ou extração inexistente (id mal formado também é 404) |
+| 413 | `FILE_TOO_LARGE` | acima de `UPLOAD_MAX_BYTES` |
+| 502 | `LIA_UNAVAILABLE` | IA fora do ar ou timeout |
+| 502 | `LIA_ERROR` | IA respondeu erro (inclusive o 413 de prompt grande demais); `details` traz `status` e o `code` da IA |
+| 502 | `LIA_INVALID_RESPONSE` | resposta da IA sem `text`, sem objeto JSON ou com nº de vetores errado |
 
-### E na entrega?
+## Como funciona
 
-Desenvolva como preferir. Na entrega, o ideal é que tudo suba com **`docker compose up`**: Mongo, mock e a sua API, juntos. É assim que rodamos a correção. Se não for possível, documente no seu README como rodar sem Docker; aceitamos, mas a entrega com Docker conta a favor (veja [Entrega](#entrega)).
+O `POST /companies/:companyKey/extractions`, passo a passo (`src/services/extraction.service.js`):
 
-## O que construir
+1. **Empresa e campos** vêm do Mongo. Empresa inexistente → 404, antes de olhar o arquivo.
+2. **Arquivo**: precisa existir e começar com `%PDF-`; o mimetype enviado pelo cliente é ignorado.
+3. **Leitura do PDF** com `pdf-parse`: texto e número de páginas.
+4. **Estratégia**:
+   - até 5 páginas → `fullContent`: o texto vai inteiro para a IA;
+   - mais de 5 → `chunked` (RAG): o texto é dividido em trechos de 1.200 caracteres com 200 de sobreposição; trechos e
+     frases de busca da empresa vão numa única chamada ao `/v1/embeddings`; para cada frase, os `topK` trechos de maior
+     similaridade de cosseno; a união, sem repetir trecho, volta à ordem do documento. Se o prompt passar de 16.000
+     caracteres, saem os trechos de menor nota. `usedChunks` é quantos trechos ficaram no prompt.
+5. **Prompt**: instrução, a lista de campos (`key`, tipo, label e opções) e os trechos.
+6. **Limpeza da resposta**: acha o objeto JSON no meio do texto, descarta chaves que não são campos, converte nulos,
+   datas e opções (ver [Decisões](#decisões)).
+7. **Regras de exibição**: campo visível quando todas as condições do `attached` valem; `formData` só com os visíveis;
+   `missingRequired` = obrigatórios visíveis e vazios.
+8. **Gravação** no Mongo e resposta `201`. Se qualquer passo falhar, nada é gravado.
 
-Uma API em **Node.js** com **MongoDB**. Framework e bibliotecas ficam à sua escolha.
+## Arquitetura
 
-### 1. Seed
-
-A API lê do banco as empresas, os campos de cada formulário e as frases de busca. Para não ter que cadastrar tudo isso à mão, empresa por empresa e campo por campo, é comum ter um **script de seed**: um script que lê arquivos com os dados iniciais e popula o banco. Assim qualquer pessoa (inclusive a nossa correção) sobe o projeto já com os dados certos.
-
-Crie esse script, rodando com **`npm run seed`**, que carrega no Mongo os arquivos da pasta `data/`:
-
-| Arquivo | O que tem |
-|---|---|
-| `companies.json` | as 2 empresas (`key` e nome) |
-| `fields.json` | os campos do formulário de cada empresa (13 da `acme-edu` e 12 da `rodovia-sul`), ligados à empresa por `companyKey` |
-| `queries.json` | as frases de busca do RAG de cada empresa, agrupadas pela `key` da empresa |
-
-Como guardar esses dados (quantas coleções, que formato) fica a seu critério.
-
-**O seed precisa poder rodar mais de uma vez.** Rodar de novo não pode duplicar nada: depois de duas execuções, o banco continua com 2 empresas e 25 campos. E se um arquivo mudar (um `label` corrigido, uma opção nova), rodar o seed de novo atualiza o que já existe. Dica: cada registro tem uma chave natural (`key` da empresa; `companyKey` + `key` do campo) que serve para isso.
-
-Na entrega, o seed deve rodar sozinho quando o projeto sobe com `docker compose up` (veja [Entrega](#entrega)).
-
-### 2. `GET /companies/:companyKey/fields`
-
-Devolve os campos da empresa ordenados por `order`, com o mesmo formato de `data/fields.json`. `404` se a empresa não existir.
-
-### 3. `POST /companies/:companyKey/extractions`
-
-Recebe um PDF em `multipart/form-data`, no campo `file`. Responde `201`:
-
-```json
-{
-  "id": "6710f0c2a1b2c3d4e5f60718",
-  "companyKey": "acme-edu",
-  "strategy": "fullContent",
-  "usedChunks": 0,
-  "formData": { "NUMERO_PROCESSO": "1012345-67.2025.8.26.0114", "CPF_AUTOR": null, "...": "..." },
-  "missingRequired": []
-}
+```
+src/
+  routes/          HTTP: parâmetros, status, formato da resposta
+  services/        orquestração (pipeline de extração, RAG)
+  domain/          regras puras, sem IO: limpeza da resposta, regras de exibição, chunking, cosseno, prompt
+  integrations/    IO: MongoDB (repositórios), LIA (chat e embeddings), leitura de PDF
+  middlewares/     upload do PDF, tratamento de erros
+  config/          leitura e validação das variáveis de ambiente
+scripts/seed.js    npm run seed
+test/              unit/ (domínio) e integration/ (Mongo, rotas, upload, client da LIA)
 ```
 
-Erros: `400` sem arquivo ou com arquivo que não é PDF; `404` para empresa inexistente; `502` se a chamada à IA falhar.
+Cada camada só conhece a de baixo. Nenhuma regra conhece empresa ou campo pelo nome: tudo é dirigido pelos dados de
+`data/`, e uma terceira empresa funciona sem mudar código.
 
-O que acontece dentro do endpoint:
+**Stack:** Express 5, driver oficial `mongodb`, `multer` (upload em memória), `pdf-parse` 2, `zod` (validação do env e
+do seed), `date-fns` (datas), `fetch` nativo, `node:test` + `supertest`.
 
-**a) Estratégia.** Leia o texto do PDF (ex.: `pdf-parse`).
-- **Até 5 páginas** (`strategy: "fullContent"`): o texto vai inteiro para a IA.
-- **Mais de 5 páginas** (`strategy: "chunked"`): o texto não cabe no prompt. Faça RAG: divida o texto em trechos (chunks), gere os embeddings dos trechos e das frases de `queries.json` daquela empresa com o `/v1/embeddings` do mock, ordene os trechos por **similaridade de cosseno** e mande para a IA só os mais relevantes. Use os `topK` de cada frase, sem repetir trecho. `usedChunks` é quantos trechos foram no prompt.
+## Decisões
 
-**b) Prompt.** Peça para a IA retornar o valor de cada campo da empresa, a partir do texto selecionado no passo anterior. Identifique cada campo pela `key` exata (ex.: `NUMERO_PROCESSO`): é por ela que a IA devolve os valores.
+### Pós-processamento da resposta da IA
+- **Nulos**: `"INDEFINIDO"`, `"NÃO SE APLICA"`, `"N/A"` e vazio são comparados **exatamente** (depois de tirar os
+  espaços das pontas), como o enunciado lista. `"indefinido"` em minúsculas não vira `null`.
+- **Espaços nas pontas** são removidos em todos os tipos, não só em `text`: espaço nas pontas nunca é conteúdo, e sem isso
+  `" 22/01/2025"` viraria `null` em silêncio.
+- **Datas**: só `DD/MM/AAAA` e `AAAA-MM-DD`, a string inteira, com validação de calendário (`31/02/2025` → `null`).
+- **Opções**: igualdade com o `value` ou o `label`, ignorando só caixa e acento. O `value` tem prioridade se uma opção
+  tiver o mesmo texto que o label de outra. Nada de semelhança parcial.
+- **Valores que não são texto** (número, booleano) viram texto; objeto e lista viram `null`.
+- **`type` desconhecido** (uma terceira empresa com um tipo novo) é tratado como texto e gera um aviso no log, em vez
+  de derrubar o seed ou a extração.
+- **Resposta sem objeto JSON** → 502. JSON válido com campos faltando não é erro: os ausentes viram `null`. Sem retry:
+  o mock é determinístico.
 
-**c) Pós-processamento.** A resposta da IA não é confiável. Transforme-a em valores:
-- extraia o JSON da resposta (ele pode vir no meio de texto e dentro de ```json);
-- descarte chaves que não são campos da empresa;
-- `"INDEFINIDO"`, `"NÃO SE APLICA"`, `"N/A"` e vazio viram `null`;
-- **text**: o texto sem espaços nas pontas;
-- **date**: a IA pode responder `DD/MM/AAAA` ou `AAAA-MM-DD`; grave `AAAA-MM-DD`, ou `null` se não for uma data válida;
-- **select**: grave o `value` da opção. A IA pode responder o `label` ou o `value`, em qualquer caixa e com ou sem acento (`"NÃO"`, `"nao"` e `"N"` são a opção `{ value: "N", label: "Não" }`). Se não casar com nenhuma opção, `null`. Não chute por semelhança.
+### Regras de exibição
+- **Cascata**: um campo oculto conta como vazio para os campos que dependem dele. Com os dados atuais o resultado é o
+  mesmo sem cascata (os campos repetem a condição do pai), mas para outra empresa evita mostrar um campo cuja condição
+  depende de um valor que não está no formulário.
+- `attached` apontando para um campo inexistente → condição falsa → campo oculto.
 
-**d) Regras de exibição (`attached`).**
-- Campo sem `attached`: sempre visível.
-- Campo com `attached`: visível quando **todas** as condições valem. A condição `{ "key": "X", "values": ["A", "B"] }` vale quando o valor de X é `"A"` ou `"B"`.
+### PDF e estratégia
+- **Até 5 páginas, o texto vai inteiro**, como o enunciado manda, mesmo que passe de 16.000 caracteres. Nesse caso o mock
+  responde 413 e a API responde 502 (ver [Limitações](#limitações-conhecidas)).
+- **PDF detectado pelo conteúdo** (`%PDF-` nos primeiros 1024 bytes), não pelo mimetype, que vem do cliente.
+- **PDF corrompido ou com senha** → 400. **PDF sem texto** (digitalizado) segue o fluxo: 201 com os campos `null` e os
+  obrigatórios em `missingRequired`.
+- **Empresa inexistente responde 404 mesmo sem arquivo**: a checagem fica no handler, depois de receber o upload, para não
+  responder antes de consumir o corpo (o cliente poderia receber `ECONNRESET` em vez do 404).
+- **`pdf-parse` 2**: comparado com a versão 1 nos dois PDFs (mesmas páginas, todas as evidências do mock presentes); a 2
+  usa o pdf.js atual e gera texto ~8% menor.
 
-**e) Resposta.** O `formData` tem **todos os campos visíveis** (com `null` quando não houver valor) e **nenhum campo oculto**. `missingRequired` lista os campos `required` que estão visíveis e vazios. Campo oculto nunca é obrigatório.
+### RAG
+- **Chunking** por janela fixa de caracteres com sobreposição, como no material de apoio sobre RAG. Garante que todo trecho
+  de até 200 caracteres cabe inteiro em algum chunk. O texto não é reescrito (sem colapsar espaços nem tirar acentos):
+  o mock compara as evidências com o texto do prompt.
+- **`topK` por frase**: `queries.json` só traz textos, então cada frase usa `RAG_DEFAULT_TOP_K` (2). O seed também aceita
+  `{ "text": "...", "topK": 3 }` para definir o `topK` de uma frase.
+- **Sem repetir trecho**: a seleção é a união dos `topK` de cada frase; um trecho escolhido por duas frases entra uma vez,
+  sem completar com o próximo.
+- **Embeddings numa chamada só**: o contrato do mock não limita o número de entradas.
+- **Empresa sem frases de busca**: nenhum trecho é enviado (sem frase, nenhum trecho é "relevante") e os campos saem `null`.
+- Com os valores padrão, o `processo-longo` usa 12 trechos e um prompt de 15.424 caracteres, com todas as evidências
+  presentes. O enunciado mostra `usedChunks: 11`, mas diz que o número depende do RAG; os parâmetros não foram ajustados
+  para bater esse valor.
 
-**f) Persistência.** Grave a extração no Mongo.
+### Seed
+- Idempotente por **índice único** (`key`; `companyKey + key`; `companyKey + position`) e upsert com `replaceOne`: um
+  atributo removido do arquivo some do banco, e campos que saíram do arquivo são removidos.
+- Atributos desconhecidos dos campos são preservados, para o `GET /fields` devolver o formato do arquivo.
+- Erro estrutural (campo sem `key`, `companyKey` sem empresa, chave duplicada) falha o seed com código ≠ 0; no Docker,
+  isso impede a API de subir com o banco vazio.
 
-#### Respostas esperadas para os PDFs fornecidos
+### Respostas
+- A extração devolve `createdAt` além dos campos do exemplo (o enunciado o cita e diz que campos a mais não atrapalham).
+- `GET /companies/:companyKey/fields` de uma empresa existente sem campos → `200 []`.
+- `companyKey` é comparada exatamente (`ACME-EDU` → 404).
 
-Use para conferir a sua implementação. `id` e `createdAt` mudam a cada chamada, `usedChunks` depende do seu RAG, e campos a mais na resposta não atrapalham.
+## Limitações conhecidas
 
-`POST /companies/acme-edu/extractions` com `data/documents/processo-curto.pdf`:
+- **PDF de até 5 páginas com mais de 16.000 caracteres** → 502 (`LIA_ERROR`, `upstreamCode: context_length_exceeded`).
+  O enunciado manda enviar o texto inteiro até 5 páginas; a densidade medida vai de ~2.000 a ~3.800 caracteres por
+  página, então 5 páginas densas passam do limite.
+- **Corte do prompt pela menor nota**: se o RAG escolher trechos demais, o corte pode tirar o único trecho de uma frase.
+  Com os dados atuais não há corte.
+- **Nulos em outra grafia** (`"indefinido"`, `"NAO SE APLICA"`) não viram `null` num campo de texto, porque o enunciado
+  lista os valores exatos.
 
-```json
-{
-  "id": "6ad0d9d9bef8409cec867662",
-  "companyKey": "acme-edu",
-  "strategy": "fullContent",
-  "usedChunks": 0,
-  "formData": {
-    "NUMERO_PROCESSO": "1012345-67.2025.8.26.0114",
-    "DATA_DISTRIBUICAO": "2025-03-12",
-    "NOME_AUTOR": "Mariana Costa Ribeiro",
-    "CPF_AUTOR": "123.456.789-09",
-    "TIPO_ACAO": "DANOS_MORAIS",
-    "NEGATIVACAO": "S",
-    "ORGAO_NEGATIVACAO": "SERASA",
-    "PEDIDO_LIMINAR": "S",
-    "DESCRICAO_LIMINAR": "Exclusão imediata do nome da autora dos cadastros de inadimplentes",
-    "VALOR_DANO_MORAL": "R$ 15.000,00",
-    "VALOR_CAUSA": "R$ 19.870,00"
-  },
-  "missingRequired": []
-}
-```
+## O que eu faria com mais tempo
 
-`NOME_CURSO` e `NUMERO_MATRICULA` não aparecem: a IA devolve os dois, mas eles só são visíveis quando `TIPO_ACAO` é `COBRANCA_INDEVIDA` ou `DIPLOMA`.
-
-`POST /companies/rodovia-sul/extractions` com `data/documents/processo-longo.pdf`:
-
-```json
-{
-  "id": "6ad0dbb128fdd31dc862720a",
-  "companyKey": "rodovia-sul",
-  "strategy": "chunked",
-  "usedChunks": 11,
-  "formData": {
-    "NUMERO_PROCESSO": "5004321-10.2025.8.21.0001",
-    "NOME_AUTOR": "Carlos Eduardo Nunes",
-    "TIPO_OCORRENCIA": "ACIDENTE",
-    "DATA_FATO": "2025-01-22",
-    "NOME_RODOVIA": "BR-116",
-    "KM_RODOVIA": "km 245",
-    "PLACA_VEICULO": "ABC1D23",
-    "HOUVE_VITIMA": "S",
-    "TIPO_LESAO": "GRAVE",
-    "NUMERO_BO": "2025/000987",
-    "DATA_BO": "2025-01-23",
-    "VALOR_CAUSA": "R$ 250.000,00"
-  },
-  "missingRequired": []
-}
-```
-
-Se algum campo vier `null` aqui, o trecho do PDF que comprova o valor não chegou no prompt: reveja o RAG (use o modo de depuração do mock, abaixo).
-
-### 4. `GET /extractions/:id`
-
-Devolve a extração gravada, no mesmo formato. `404` se não existir.
-
-### 5. README
-
-Como rodar o projeto e as decisões que você tomou.
-
-## O LIA Mock
-
-Base: `http://localhost:4010` (dentro do compose, `http://lia-mock:4010`).
-
-### `POST /v1/chat`
-
-```json
-{
-  "system": "opcional",
-  "messages": [{ "role": "user", "content": "..." }]
-}
-```
-
-Responde `{ "text": "...", "usage": { "inputTokens": 0, "outputTokens": 0 }, "model": "lia-mock-1" }`. O JSON com os campos vem dentro de `text`.
-
-- **Limite de 16.000 caracteres** somando `system` e todas as `messages`. Acima disso: `413` com `code: "context_length_exceeded"`.
-- O "modelo" só responde as keys que aparecem no prompt, e só acha um valor se o trecho do documento que o comprova estiver no prompt. Senão, responde `"INDEFINIDO"`. Ou seja: RAG ruim aparece como campo vazio.
-- Ele se comporta como um LLM de verdade: às vezes responde chaves que ninguém pediu, labels no lugar de values, caixa e acento variados.
-
-### `POST /v1/embeddings`
-
-`{ "inputs": ["texto 1", "texto 2"] }` → `{ "vectors": [[...], [...]], "dimensions": 512 }`
-
-Um vetor por texto, na mesma ordem. Textos parecidos geram vetores próximos; a comparação (similaridade de cosseno) e a escolha dos trechos ficam com você.
-
-### Depuração
-
-Com `MOCK_DEBUG=1` no serviço do mock (ou o header `x-mock-debug: 1` na requisição), a resposta do chat traz `debug.missingEvidence`: as keys pedidas cujo trecho não chegou no prompt. Útil para ajustar o RAG.
-
-## Entrega
-
-1. Um repositório no GitHub (público, ou privado com convite para quem enviou o teste).
-2. `docker compose up` sobe **tudo**: mongo, lia-mock e a sua API na porta **3000**, com o seed rodando automaticamente.
-
-O ideal é a entrega com Docker. Se não conseguir, documente como rodar sem ele (`MONGO_URI`, `LIA_BASE_URL` e os comandos; veja [Rodando o ambiente](#rodando-o-ambiente-com-ou-sem-docker)). Aceitamos, mas o Docker conta a favor.
-
-> Na correção, rodamos a sua API contra documentos **além** dos dois fornecidos, das mesmas empresas. Implemente as regras, não as respostas.
-
-## Como avaliamos
-
-- Funciona: os endpoints respeitam o contrato e o formulário sai certo.
-- Regras genéricas: nada de `if` por empresa ou por campo. Uma terceira empresa em `data/` deveria funcionar sem mudar código.
-- Organização: rotas, regras de negócio e integrações (Mongo, IA) separadas.
-- Tratamento de erros: status HTTP coerentes, inclusive quando a IA falha.
-- README claro, com as suas decisões e o que faria com mais tempo.
-
-## Bônus (opcional)
-
-Uma tela React que renderiza o formulário de uma empresa aplicando as regras de exibição.
-
-Se algo no enunciado estiver ambíguo, escolha um caminho, siga e registre no README.
+- **Testes de integração mais amplos**: uma terceira empresa fictícia criada só em `data/` (com `attached` em cascata),
+  carregada pelo seed e extraída via HTTP contra o mock, provando que funciona sem mudar código e uma bateria de PDFs
+  além dos dois fornecidos (densos, digitalizados, com senha).
+- **PDF curto que não cabe no prompt**: aplicar o RAG também nesse caso, em vez de responder 502.
+- **Retry com backoff** para falhas transitórias da IA.
+- **OCR** para PDFs digitalizados, sem texto.
+- **Embeddings em lotes** de tamanho configurável: provedores reais limitam o número de entradas e de tokens por chamada.
+- **Empresa sem frases de busca**: um fallback (por exemplo, o começo do documento até o limite do prompt) no lugar do
+  formulário vazio.
+- **CORS configurável na API**, para o front chamá-la direto, sem o proxy de desenvolvimento.
